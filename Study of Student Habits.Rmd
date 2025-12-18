@@ -1,0 +1,369 @@
+---
+title: 'A Study of How Diﬀerent Habits of Students Aﬀect Their Academic Performance,'
+author: Jiayi Xu
+#date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Abstract
+This project examines the impact of student habits on academic performance using a dataset of 1,000 students with 14 predictors. I conducted exploratory data analysis, fitted multiple linear models, and applied remedial strategies such as Box-Cox transformation to address violations of model assumptions. Through stepwise selection based on BIC, I identified a final model (Model 3) with six key predictors: study hours, social media usage, attendance percentage, sleep hours, exercise frequency, and mental health rating. To respect the natural bounds of exam scores, I clipped the model’s fitted values to the range [0, 100], which improved interpretability and residual behavior without compromising performance. Model 3 explains 79.2% of the variance in the transformed exam scores and highlights the significant positive effects of study time, attendance, sleep, exercise, and mental health, while social media usage shows a negative association.
+
+# Exploratory Data Analysis
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(corrplot)
+library(GGally)
+library(caret)
+library(glmnet)
+library(leaps)
+library(patchwork)
+library(reshape2)
+library(ggplot2)
+library(faraway)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+data <- read.csv("data/StudentsHabits.csv")
+data <- data[,-1]
+paste("Sample size:", nrow(data))
+paste("Number of predictors:", ncol(data) - 1)
+```
+The original dataset contains 1000 observations and 14 predictors. Statistics are summarized as following:
+```{r echo=FALSE}
+options(width = 90)
+summary(data)
+```
+## Encoding
+- I find that gender, part_time_job, diet_quality, parental_education_level, internet_quality, extracurricular_participation are categorical.
+
+- I excluded 42 observations labeled ‘Other’ in the gender variable because they represented less than 5% of the data and could not be reliably modeled. This was done to improve model accuracy and interpretability.
+
+```{r, echo = FALSE}
+# Drop observations where gender is not 'female' or 'male'
+data <- data[which(data$gender == 'Female' | data$gender == 'Male'), ]
+data$gender <- ifelse(data$gender == "Female", 1, 0)
+```
+
+
+```{r, echo = FALSE}
+data$part_time_job <- ifelse(data$part_time_job == "Yes", 1, 0)
+```
+
+
+```{r, echo = FALSE}
+data$diet_quality <- as.numeric(factor(data$diet_quality, c("Poor","Fair","Good"), ordered=TRUE)) - 1
+```
+
+- For the variable parental_education_level, I group it into “University” vs. “Non-university”, and then encode the groups as binary: University = 1, Non-university = 0.
+
+
+```{r, echo = FALSE}
+data$parental_education_level <- ifelse(data$parental_education_level %in% c("Bachelor", "Master"), "University", "Non-university")
+data$parental_education_level <- ifelse(data$parental_education_level == "University", 1, 0)
+```
+
+
+```{r, echo = FALSE}
+data$internet_quality <- as.numeric(factor(data$internet_quality, c("Poor","Average","Good"), ordered=TRUE)) - 1
+```
+
+
+```{r, echo = FALSE}
+data$extracurricular_participation <- ifelse(data$extracurricular_participation == "Yes", 1, 0)
+```
+
+| Variable                    | Type         | Encoding                              |
+|-----------------------------|--------------|----------------------------------------|
+| Gender                      | Categorical  | Female = 0, Male = 1                   |
+| Part-time Job               | Binary       | No = 0, Yes = 1                        |
+| Diet Quality                | Ordinal      | Poor = 0, Fair = 1, Good = 2           |
+| Parental Education Level    | Binary       | Non-university = 0, University = 1     |
+| Internet Quality            | Ordinal      | Poor = 0, Average = 1, Good = 2        |
+| Extracurricular Participation | Binary    | No = 0, Yes = 1                        |
+
+
+## Scatter plot
+After pre-processing, I plot exam_score versus all independent variables to detect potential linear relationship.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+num_vars <- names(data)[sapply(data, is.numeric)]
+x_vars   <- setdiff(num_vars, "exam_score")
+
+plots <- map(x_vars, function(var) {
+  ggplot(data, aes_string(x = var, y = "exam_score")) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "lm", se = FALSE, color = "blue") +
+    theme_minimal() +
+    labs(x = var, y = "Exam Score") +
+    theme(
+      axis.title = element_text(size = 8),
+      axis.text = element_text(size = 6),
+      plot.title = element_text(size = 10)
+    )
+})
+
+wrap_plots(plots, ncol = 4)
+```
+*Observations:* 
+
+The scatterplot matrix reveals key insights into the relationships between individual predictors and exam scores. Among all variables, study_hours_per_day shows a strong positive linear relationship with exam scores, while mental_health_rating, sleep_hours, and attendance_percentage exhibit mild positive trends. In contrast, social_media_hours and netflix_hours show slight negative associations with exam performance. Variables such as age, gender, part_time_job, diet_quality, exercise_frequency, parental_education_level, internet_quality, and extracurricular_participation display little to no clear relationship with exam scores, as indicated by flat regression lines or low variability. These findings suggest that study habits and mental well-being are more predictive of academic performance, while many demographic or lifestyle variables may have limited explanatory power in this context.
+
+## Multicollinearity
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+num_vars <- names(data)[sapply(data, is.numeric) & names(data) != "exam_score"]
+cor_mat  <- cor(data[, num_vars], use = "pairwise.complete.obs")
+cor_mat_round <- round(cor_mat, 2)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align = "center"}
+melted_cor <- melt(cor_mat_round) 
+
+ggplot(melted_cor, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +       
+  scale_fill_gradient2(
+    low  = "#3C5488FF",
+    mid  = "white",
+    high = "#D6604DFF",
+    midpoint = 0,
+    limits   = c(-1, 1),
+    name     = "Correlation coefficient"
+  ) +
+  geom_text(aes(label = sprintf("%.2f", value)), size = 2) +  
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    panel.grid  = element_blank()
+  ) +
+  coord_fixed()
+```
+
+*Observations:* 
+
+According to Correlation Matrix, study hours, attendance_percentage, sleep hours, exercise_frequency and mental‑health rating correlate positively with exam score, while social‑media and Netflix hours show negative associations.  
+
+No pair exceeds 0.8, so multicollinearity is unlikely to be a major issue.
+
+# Model Fitting
+## Linear model with all variables (Model 1)
+I first fit a linear model with all predictors:
+```{r, echo = FALSE}
+mod1 <- lm(exam_score ~ ., data = data)
+summary(mod1)
+```
+*findings:* It shows strong evidence that some predictors affect exam score significantly.
+ 
+## Diagnostics for the basic linear model
+I first check unusual observations.
+```{r, echo = FALSE, fig.align = "center", fig.width=8.5, fig.height=3.5}
+p_1 = 15
+n_1 = 958
+lev=influence(mod1)$hat
+lev[lev>2*p_1/n_1] #Rule of thumb
+par(mfrow = c(1, 2))
+halfnorm(lev, 4, labs = row.names(data), ylab = 'Leverages')
+
+cook = cooks.distance(mod1)
+max(cook)
+halfnorm(cook, labs = row.names(data), ylab = 'Cooks distance')
+```
+*Findings:* The diagnostic results for the basic linear model indicate that observations 38 and 415 have high leverage values exceeding the threshold of 0.0313, suggesting they possess unusual combinations of predictor values. However, the maximum Cook’s distance is only 0.0275, which is well below common concern thresholds (e.g., 0.5 or 1), indicating that no single observation has a substantial influence on the overall regression results. Overall, the model appears to be reasonably robust, with no highly influential outliers.
+
+```{r, echo = FALSE}
+# Bonferroni correction
+cutoff <- abs(qt(.05/(2*n_1), n_1-p_1-1)) # Bonferroni correction
+cutoff
+rstud = rstudent(mod1)
+which(abs(rstud) > cutoff) # Compare the largest rstud with cutoff
+```
+
+*Findings:* Using the Bonferroni correction to control for multiple comparisons, the cutoff for identifying outliers based on studentized residuals is approximately 4.06. Four observations (266, 431, 256, and 418) have absolute studentized residuals exceeding this threshold, indicating they are statistically significant outliers in the context of the model. 
+
+```{r,echo = FALSE}
+par(mfrow=c(2,2))
+plot(mod1)
+```
+
+*Findings:* The diagnostic plots reveal several concerns with the linear model. The Residuals vs Fitted plot shows a curved pattern, indicating a violation of the linearity assumption and potential heteroscedasticity. The Normal Q-Q plot reveals deviations from the diagonal at both ends, suggesting that the residuals are not perfectly normally distributed. The Scale-Location plot further confirms unequal variance, as the spread of residuals changes across fitted values. Lastly, the Residuals vs Leverage plot identifies a few observations (e.g., 256 and 418) with moderate leverage, though none appear to be highly influential. Overall, these diagnostics suggest that the model may benefit from transformations or more flexible modeling techniques.
+
+**Remedy:** Motivated by the diagnostics, I consider Box Cox transformation. 
+```{r, echo = FALSE, message = FALSE, fig.align = "center", fig.width=8, fig.height=4.5}
+library(MASS)
+boxcox_result = boxcox(mod1, lambda = seq(-2, 5, 0.1), plotit = TRUE)
+lambda_opt = boxcox_result$x[which.max(boxcox_result$y)]
+lambda_opt
+```
+*Findings:* $\lambda_{opt} = 3.59$ gives the highest log likelihood.
+
+## Refit the linear model using the transformed response (Model 2)
+```{r, echo = FALSE}
+data$exam_score_trans <- (data$exam_score^lambda_opt - 1) / lambda_opt
+mod2 <- lm(exam_score_trans ~ . - exam_score, data = data)
+summary(mod2)
+```
+
+## Diagnostics for Model 2 
+Diagnostic plots for Model 2 are as follows:
+```{r, echo = FALSE, fig.align = "center"}
+par(mfrow=c(2,2))
+plot(mod2)
+```
+*Findings:* The Box-Cox transformation with $\lambda = 3.59$ has significantly improved the model diagnostics. Linearity, normality, and constant variance assumptions are now reasonably satisfied. The model is better suited for inference and prediction in its transformed form.
+
+```{r, echo = FALSE}
+library(lmtest)
+# BP test on the Model 2
+bptest(mod2)
+```
+*Findings:* There is no significant evidence of heteroskedasticity in the residuals of the transformed model (mod2). 
+
+```{r, echo = FALSE}
+# New dataset (remove the original exam score)
+new_data <- data
+new_data$exam_score <- NULL
+```
+
+## Variable selection (Model Comparison with Model 2 Included)
+I start from Model 2, and use stepwise procedure to select a subset of predictors, using BIC as the criterion.
+```{r,, echo = FALSE, fig.align = "center"}
+library(leaps)
+step(mod2, direction="both", k=log(nrow(new_data)), trace = 0)
+```
+*Findings:* Using stepwise selection based on the Bayesian Information Criterion (BIC), six predictors were selected as the most informative for explaining variation in the Box-Cox transformed exam scores. These variables include study_hours_per_day, social_media_hours, attendance_percentage, sleep_hours, exercise_frequency, and mental_health_rating. 
+
+```{r, echo = FALSE}
+mod3 <- lm(exam_score_trans ~ study_hours_per_day + social_media_hours + attendance_percentage + sleep_hours + exercise_frequency + mental_health_rating, data = new_data)
+summary(mod3)
+```
+
+## ANCOVA Model with Interactions (Model Comparison with Model 3 Included)
+I also want to consider a model with interactions between categorical and numerical variables. An F-test that compares the additive model (Model 3) and the interaction model (Model 4) is as follows:
+```{r, echo = FALSE}
+mod4 <- lm(exam_score_trans ~ (study_hours_per_day + social_media_hours + attendance_percentage + sleep_hours) * (exercise_frequency + mental_health_rating), data = new_data)
+anova(mod3, mod4)
+```
+*Findings:* Since the p-value is greater than 0.05, I fail to reject the null hypothesis. This means that the inclusion of interaction terms does not significantly improve the model.
+
+## Shrinkage Methods (Ridge and Lasso Regression)
+I also try some shrinkage methods including the ridge and Lasso regression. I consider the same set of variables as Model 4, and transformed exam score as the response. The following figures show the cross-validation errors of the two methods with a range of $\lambda$ values.
+```{r, echo = FALSE, fig.align = "center", fig.width=8, fig.height=4}
+x <- model.matrix(mod3)[, -1]
+y <- new_data$exam_score_trans
+grid <- c(0, 10^seq(10, -2, length = 100))
+ridge_mod <- cv.glmnet(x, y, lambda = grid, alpha = 0)
+lasso_mod <- cv.glmnet(x, y, lambda = grid, alpha = 1)
+par(mfrow=c(2,2))
+plot(ridge_mod)
+plot(lasso_mod)
+```
+*Findings:* The cross-validation plots for Ridge and Lasso regression reveal that the optimal prediction accuracy is achieved at moderate-to-large values of $\lambda$. Ridge regression retains all predictors with reduced magnitude, while Lasso achieves similar error rates but also performs variable selection, shrinking some coefficients to exactly zero as $\lambda$ increases.
+
+# Diagnostic for final model (Model 3)
+```{r, echo = FALSE, fig.align = "center"}
+p_3 = 7
+n_3 = 958
+lev=influence(mod3)$hat
+lev[lev>2*p_3/n_3] #Rule of thumb
+par(mfrow = c(1, 2))
+halfnorm(lev, 4, labs = row.names(data), ylab = 'Leverages')
+
+cook = cooks.distance(mod3)
+max(cook)
+halfnorm(cook, labs = row.names(data), ylab = 'Cooks distance')
+```
+
+```{r, echo = FALSE}
+# Bonferroni correction
+cutoff <- abs(qt(.05/(2*n_3), n_3-p_3-1)) # Bonferroni correction
+cutoff
+rstud = rstudent(mod2)
+which(abs(rstud) > cutoff) # Compare the largest rstud with cutoff
+```
+
+```{r,echo = FALSE, fig.align = "center"}
+par(mfrow=c(2,2))
+plot(mod1)
+```
+
+```{r, echo = FALSE}
+library(lmtest)
+resettest(mod3, power = 2:3, type = "fitted")
+```
+
+```{r, echo = FALSE}
+bptest(mod3)
+```
+*Findings:* The Breusch-Pagan test suggests that the residuals of the final model exhibit homoskedasticity (p = 0.36), satisfying the assumption of constant variance.
+
+However, the RESET test indicates potential misspecification in functional form (p < 0.001). This may reflect unmodeled nonlinearities or interactions.
+
+## Clip fitted value into [0, 100]
+Exam scores are naturally bounded (e.g., 0 to 100). Traditional linear regression models do not respect these bounds, often predicting unrealistic value like 110. Such predictions reduce model credibility and can mislead.
+```{r, echo = FALSE}
+fitted_trans <- fitted(mod3)
+# Inverse Box-Cox transformation (lambda = 3.59)
+lambda <- 3.59
+fitted_orig <- (lambda_opt * fitted_trans + 1)^(1 / lambda_opt)
+# Clip the predicted exam scores to [0, 100]
+fitted_clipped <- pmin(pmax(fitted_orig, 0), 100)
+```
+## Residule plot for clipped model
+```{r, echo = FALSE, fig.align = "center", fig.width=8, fig.height=4}
+resid_clipped <- data$exam_score - fitted_clipped
+
+plot(fitted_clipped, resid_clipped,
+     xlab = "Clipped Fitted Values (0–100)", ylab = "Residuals",
+     main = "Residuals vs Clipped Fitted", pch = 20)
+abline(h = 0, col = "red")
+```
+```{r, echo = FALSE, fig.align = "center"}
+qqnorm(resid_clipped)
+qqline(resid_clipped, col = "red")
+```
+*Findings:* The residuals vs. clipped fitted values plot shows no clear nonlinear trend across most of the prediction range, suggesting that the linearity assumption is reasonably met in the central region. 
+
+# Discussion of Results and Conclusions
+## Summary of Findings
+After fitting multiple linear models, conducting diagnostic checks, and experimenting with transformations and interaction terms, I ultimately selected Model 3 as our final model. This model was derived from the Box-Cox transformed response using a step-wise selection approach based on BIC. It includes six key predictors:
+
+- study_hours_per_day
+- social_media_hours
+- attendance_percentage
+- sleep_hours
+- exercise_frequency
+- mental_health_rating
+
+Model 3 achieved an adjusted $R^2$ of 0.792, indicating strong explanatory power. Residual diagnostics showed no clear signs of heteroskedasticity (BP test p = 0.36), and the model demonstrated stability with no influential outliers. Although the RESET test indicated minor nonlinearity, the model's simplicity and interpretability justified its selection as the final
+model.
+
+To further improve the model's realism and residual behavior, I clipped the fitted values to the range [0, 100], aligning them with the actual exam score boundaries. This adjustment eliminated implausible predictions and led to a clearer residual pattern, satisfying the linearity assumption.
+
+## Insights
+```{r}
+coef(mod3)
+```
+These results suggest that habits related to focus, rest, and well-being (studying, sleeping, mental health, etc.) contribute positively to academic outcomes, while distractions such as social media use have negative effects. Importantly, the model allows me to quantify these effects in the transformed score space, offering insights into relative importance.
+
+
+| Habit Change                                    | Estimated Change in Transformed Exam Score |
+|-------------------------------------------------|--------------------------------------------|
+| Increase study time by 1 hour per day           | $+684,\!708$                              |
+| Increase sleep time by 1 hour per day           | $+154,\!02$                               |
+| Improve mental health rating by 1 point (1–10)  | $+107,\!238$                              |
+| Increase attendance by 1%                       | $+8,\!603$                                |
+| Increase exercise frequency by 1 unit           | $+71,\!049$                               |
+| Increase social media use by 1 hour per day     | $-122,\!488$                              |
+
+Note: Effects are on the Box-Cox transformed exam score scale ($\lambda$ = 3.59). While exact changes in raw scores are not directly interpretable, the *direction* and *relative magnitude* of each habit’s effect are valid.
+
+
+## Open Questions and Remaining Challenges
+- The RESET test (p < 0.001) suggests some functional form misspecification. This remains an area for future refinement.
+
+- Due to the Box-Cox transformation ($\lambda$ = 3.59), direct interpretation of units is not intuitive. Though relative effects are valid, mapping back to the original exam score scale is non-trivial.
+
+- Factors like motivation, teacher quality, or social economic background were not included but may also influence academic performance.
+
+
